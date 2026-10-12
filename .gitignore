@@ -1,0 +1,12 @@
+
+# Python virtual environment and cache
+venv/
+__pycache__/
+*.py[cod]
+
+# Secrets and environment files
+.env
+.env.*
+
+# Database certificate bundle
+global-bundle.pem

@@ -1,61 +1,95 @@
-from flask import Flask,render_template,request
+
+import os
+import uuid
+from flask import Flask, render_template, request
 import boto3
 import pymysql
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
-bucket_name="student-photo-demo-gopu"
+BUCKET_NAME = os.environ.get("S3_BUCKET")
+DB_HOST = os.environ.get("DB_HOST")
+DB_PORT = int(os.environ.get("DB_PORT", "3306"))
+DB_USER = os.environ.get("DB_USER", "admin")
+DB_NAME = os.environ.get("DB_NAME", "studentdb")
+DB_PASSWORD = os.environ.get("DB_PASSWORD")
 
-db=pymysql.connect(
-host="100.57.165.48",
-port="3306",
-user="admin",
-password="Admin123",
-database="studentdb"
-)
+s3 = boto3.client("s3", region_name="ap-south-1")
 
-@app.route('/')
+
+def get_db_connection():
+    if not all([DB_HOST, DB_USER, DB_NAME, DB_PASSWORD]):
+        raise RuntimeError("Database environment variables are missing")
+
+    return pymysql.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME,
+        connect_timeout=5,
+        cursorclass=pymysql.cursors.DictCursor
+    )
+
+
+@app.route("/")
 def home():
-    return render_template('index.html')
+    return render_template("index.html")
 
-@app.route('/register',methods=['POST'])
+
+@app.route("/register", methods=["POST"])
 def register():
+    name = request.form.get("name", "").strip()
+    email = request.form.get("email", "").strip()
+    course = request.form.get("course", "").strip()
+    photo = request.files.get("photo")
 
-    name=request.form['name']
-    email=request.form['email']
-    course=request.form['course']
+    if not name or not email or not course or not photo:
+        return "Please complete all fields and select a photo.", 400
 
-    photo=request.files['photo']
+    if not BUCKET_NAME:
+        return "S3 bucket configuration is missing.", 500
 
-    s3=boto3.client('s3')
+    if not photo.filename:
+        return "Please select a photo.", 400
 
-    s3.upload_fileobj(
-        photo,
-        bucket_name,
-        photo.filename
-    )
+    safe_name = secure_filename(photo.filename)
+    object_key = f"students/{uuid.uuid4().hex}_{safe_name}"
 
-    photo_url=f"https://{bucket_name}.s3.amazonaws.com/{photo.filename}"
+    try:
+        s3.upload_fileobj(
+            photo,
+            BUCKET_NAME,
+            object_key,
+            ExtraArgs={"ContentType": photo.mimetype or "application/octet-stream"}
+        )
 
-    cursor=db.cursor()
+        # Store the S3 object URL. The bucket can remain private.
+        photo_url = (
+            f"https://{BUCKET_NAME}.s3.ap-south-1.amazonaws.com/{object_key}"
+        )
 
-    sql="""
-    INSERT INTO students
-    (name,email,course,photo_url)
-    VALUES(%s,%s,%s,%s)
-    """
+        connection = get_db_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO students (name, email, course, photo_url)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (name, email, course, photo_url)
+                )
+            connection.commit()
+        finally:
+            connection.close()
 
-    cursor.execute(
-        sql,
-        (name,email,course,photo_url)
-    )
+        return "Student registered successfully!", 200
 
-    db.commit()
+    except Exception:
+        app.logger.exception("Student registration failed")
+        return "Registration failed. Check the application logs.", 500
 
-    return "Student Registered Successfully"
 
-if __name__=="__main__":
-    app.run(
-        host="0.0.0.0",
-        port=5000
-    )
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
